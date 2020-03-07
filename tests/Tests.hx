@@ -1,8 +1,10 @@
 package ;
 
+import issues.Issue49;
+import issues.Issue44;
+
 import tink.state.*;
 import js.Browser.*;
-//import vdom.VDom.*;
 import coconut.ui.*;
 import coconut.data.*;
 import coconut.data.Value;
@@ -15,7 +17,7 @@ class Tests extends haxe.unit.TestCase {
   static public function log(msg:String, ?pos:haxe.PosInfos)
     entries.push('${pos.className}:$msg');
 
-  function expectLog(expected:Array<String>, ?pos:haxe.PosInfos) 
+  function expectLog(expected:Array<String>, ?pos:haxe.PosInfos)
     assertEquals(expected.join('\n'), entries.splice(0, entries.length).join('\n'), pos);
 
   override function setup() {
@@ -36,23 +38,23 @@ class Tests extends haxe.unit.TestCase {
     coconut.ui.Renderer.mount(wrapper, o);
   }
 
-  // function testNested() {
-  //   var s = new State('foo');
-  //   var foobar = new FooBar();
-  //   mount(hxx('<Nestor plain="yohoho" inner={s.value} {...foobar} />'));
-    
-  //   Renderer.updateAll();
-    
-  //   var beforeOuter = Nestor.redraws,
-  //       beforeInner = Example4.redraws;
+  function testNested() {
+    var s = new State('foo');
+    var foobar = new FooBar();
+    mount(hxx('<Nestor plain="yohoho" inner={s.value} {...foobar} />'));
 
-  //   s.set('bar');
-    
-  //   Renderer.updateAll();
-    
-  //   assertEquals(beforeOuter, Nestor.redraws);
-  //   assertEquals(beforeInner + 1, Example4.redraws);
-  // }
+    Renderer.updateAll();
+
+    var beforeOuter = Nestor.redraws,
+        beforeInner = Example4.redraws;
+
+    s.set('bar');
+
+    Renderer.updateAll();
+
+    assertEquals(beforeOuter, Nestor.redraws);
+    assertEquals(beforeInner + 1, Example4.redraws);
+  }
 
   function testSlot() {
     var s = new coconut.ui.tools.Slot(this),
@@ -75,20 +77,20 @@ class Tests extends haxe.unit.TestCase {
     assertEquals('42,0,1000', log.join(','));
     s.setData(s2);
     Renderer.updateAll();
-    assertEquals('42,0,1000', log.join(','));    
+    assertEquals('42,0,1000', log.join(','));
 
     s1.set(1001);
     s2.set(1002);
     Renderer.updateAll();
-    assertEquals('42,0,1000,1002', log.join(','));    
-  }  
+    assertEquals('42,0,1000,1002', log.join(','));
+  }
 
   function testCustom() {
     var s = new State(4);
 
     mount(hxx('<Example key={s} foo={s} bar={s} />'));
     mount(hxx('<Example foo={s} bar={s} />'));
-    
+
     assertEquals('4', q('.foo').innerHTML);
     assertEquals('4', q('.bar').innerHTML);
 
@@ -98,18 +100,6 @@ class Tests extends haxe.unit.TestCase {
     assertEquals('5', q('.foo').innerHTML);
     assertEquals('5', q('.bar').innerHTML);
   }
-  
-  // function _testOnlyCache() {
-  //   var s = new State('42');
-  //   var cache = new coconut.ui.tools.ViewCache();
-  //   function make()
-  //     return Example4.forKey(this, Observable.auto(function () return {
-  //       value: Std.string(Math.random())
-  //     }));
-
-  //   assertFalse(make() == make());
-  //   assertTrue(cache.cached(make) == cache.cached(make));
-  // }
 
   function testSlotCache() {
     var s = new State(42);
@@ -123,7 +113,7 @@ class Tests extends haxe.unit.TestCase {
           </Example6>
         </div>
       </Example6>
-    '));     
+    '));
     var elt = q('.example4');
     var id = elt.getAttribute('data-id');
     assertTrue(id != null);
@@ -135,14 +125,14 @@ class Tests extends haxe.unit.TestCase {
   }
 
   function testCache() {
-    
+
     var s = new State('42');
 
     function render(value:String):RenderResult
       return hxx('<Example4 key={"42"} value={value} />');
 
     mount(hxx('
-      <Example5 data={s}>
+      <Example5 data={s.value}>
         <renderData>
           {render(data)}
         </renderData>
@@ -155,15 +145,44 @@ class Tests extends haxe.unit.TestCase {
     Renderer.updateAll();
     assertEquals('321', q('.example4').innerHTML);
     assertEquals(id, q('.example4').getAttribute('data-id'));
-    
+
   }
-  
+
+  function testControlled() {
+    mount(hxx('<ControlledCounter id="counter1"/>'));
+    assertEquals('0', q('#counter1').innerHTML);
+    click('#counter1');
+    assertEquals('1', q('#counter1').innerHTML);
+
+    var f = new Foo({ foo: 42 });
+
+    mount(hxx('<ControlledCounter id="counter2" count=${f.foo} />'));
+    assertEquals('42', q('#counter2').innerHTML);
+    click('#counter2');
+    assertEquals('43', q('#counter2').innerHTML);
+
+    mount(hxx('<KeyPad />'));
+    assertEquals(null, q('button.selected[data-value="1"]'));
+    click('button[data-value="1"]');
+    assertEquals('1', q('button.selected[data-value="1"]').innerHTML);
+  }
+
+  static function click(selector) {
+    q(selector).click();
+    Renderer.updateAll();
+  }
+
+  function testIssue49() {
+    mount(Issue49.buttons());
+    assertEquals('DEFAULT', q('span').innerHTML);
+  }
+
   function testModel() {
     var model = new Foo({ foo: 4 });
 
     var e = null;
     mount(hxx('<Example2 ref={function (inst) e = inst} model={model} />'));
-    
+
     assertEquals('4', q('.foo').innerHTML);
     assertEquals('4', q('.bar').innerHTML);
     assertEquals('0', q('.baz').innerHTML);
@@ -176,18 +195,18 @@ class Tests extends haxe.unit.TestCase {
     e.baz = 42;
     Renderer.updateAll();
     assertEquals('42', q('.baz').innerHTML);
-  }  
-  
+  }
+
   function testModelInCustom() {
-    
+
     var variants = [
-      function (model:Foo) return hxx('<Example foo={model.foo} {...model} />'), 
+      function (model:Foo) return hxx('<Example foo={model.foo} {...model} />'),
       function (model:Foo) return hxx('<Example foo={model.foo} {...model} bar={model.bar} />')
     ];
     for (render in variants) {
       var model = new Foo({ foo: 4 });
       mount(render(model));
-      
+
       assertEquals('4', q('.foo').innerHTML);
       assertEquals('4', q('.bar').innerHTML);
 
@@ -195,11 +214,11 @@ class Tests extends haxe.unit.TestCase {
       Renderer.updateAll();
       assertEquals('5', q('.foo').innerHTML);
       assertEquals('5', q('.bar').innerHTML);
-      
+
       setup();
     }
 
-  }  
+  }
 
   function testIssue31() {
     var counter = new State(0),
@@ -234,9 +253,31 @@ class Tests extends haxe.unit.TestCase {
       button.onclick();
       assertTrue(false);
     }
+    #if debug
     catch (e:String)
       assertEquals('mandatory attribute onclick of <SimpleButton/> was set to null', e);
-  }  
+    #else
+    catch (e:Dynamic) {
+
+    }
+    #end
+  }
+
+  function testSnapshots() {
+    var state = new State(123);
+    mount(hxx('<Snapshotter value=${state.value} />'));
+    state.set(321);
+    Observable.updateAll();
+    expectLog(['Snapshotter:123']);
+  }
+
+  function testViewDidRender() {
+    var state = new State(123);
+    mount(hxx('<DidRender counter=${state.value} />'));
+    state.set(321);
+    Observable.updateAll();
+    expectLog(['DidRender:true', 'DidRender:false']);
+  }
 
   function testMisc() {//horay for naming!
 
@@ -244,7 +285,7 @@ class Tests extends haxe.unit.TestCase {
         inst = new Inst({}),
         instRef:Inst = null,
         blargh:Blargh = null;
-    
+
     mount(hxx('
       <Blargh ref={function (v) blargh = v}>
         <blub>
@@ -257,12 +298,12 @@ class Tests extends haxe.unit.TestCase {
             <video>DIV</video>
           </if>
           <hr/>
-          ${inst#if react.reactify()#end}
+          ${inst#if react .reactify()#end}
           <Outer>YEAH ${r.bar}</Outer>
           <Inst ref={function (v) instRef = v} />
         </blub>
       </Blargh>
-    '));  
+    '));
 
     expectLog([
       'Outer:render',
@@ -304,7 +345,7 @@ class Tests extends haxe.unit.TestCase {
       'Inner:render',
       'Inst:mounted',
       'Inst:mounted',
-    ]);    
+    ]);
 
     assertEquals(1, inst.count);
     assertEquals(0, instRef.count);
@@ -317,7 +358,7 @@ class Tests extends haxe.unit.TestCase {
       'Inner:render',
       'Inner:updated',
       'Outer:updated',
-    ]);     
+    ]);
     #end
   }
 
@@ -343,12 +384,12 @@ class Tests extends haxe.unit.TestCase {
     assertEquals('bar', desc);
     #end
   }
-  
+
   function testPropViewReuse() {
     var states = [for (i in 0...10) new State(i)];
     var models = [for (s in states) { foo: s.observe() , bar: s.value }];
     var list = new ListModel({ items: models });
-    
+
     var redraws = Example.redraws;
 
     var before = Example.created.length;
@@ -360,22 +401,22 @@ class Tests extends haxe.unit.TestCase {
     Renderer.updateAll();
     assertEquals(before, Example.created.length);
 
-    list.items = models.concat(models);
+    list.items = models.concat([for (m in models) { bar: m.bar, foo: m.foo }]);
     Renderer.updateAll();
     assertEquals(before + 10, Example.created.length);
-    assertEquals(redraws + 20, Example.redraws);    
+    assertEquals(redraws + 20, Example.redraws);
 
     states[0].set(100);
     Renderer.updateAll();
-    
-    assertEquals(redraws + 22, Example.redraws);    
+
+    assertEquals(redraws + 22, Example.redraws);
 
     list.items = models;
-    Renderer.updateAll();    
+    Renderer.updateAll();
 
-    assertEquals(redraws + 22, Example.redraws);    
+    assertEquals(redraws + 22, Example.redraws);
   }
-  
+
   function testRootSwitch() {
     mount(hxx('<MyView />'));
     assertEquals('One', q('div').innerHTML);
@@ -385,7 +426,7 @@ class Tests extends haxe.unit.TestCase {
 
     var models = [for (i in 0...10) new Foo({ foo: i })];
     var list = new ListModel({ items: models });
-    
+
     var redraws = Example2.redraws;
 
     var before = Example2.created.length;
@@ -401,18 +442,18 @@ class Tests extends haxe.unit.TestCase {
     Renderer.updateAll();
     assertEquals(before + 10, Example2.created.length);
     assertEquals(redraws + 20, Example2.redraws);
-    
+
   }
-  
+
   static function main() {
-    
+
     var runner = new haxe.unit.TestRunner();
     runner.add(new Tests());
-    
+
     travix.Logger.exit(
       if (runner.run()) 0
       else 500
-    ); 
+    );
   }
 }
 
@@ -438,7 +479,7 @@ class MyView extends View {
         <div>Default</div>
     </switch>
   ';
-  
+
   function int() return 1;
 }
 
@@ -450,7 +491,7 @@ class Issue19 extends View {
 
 
 class Wrapper extends View {
-	
+
   @:state var key:Int = 0;
   @:attribute var depth:Int;
 
@@ -459,7 +500,7 @@ class Wrapper extends View {
       <div key=${key} onclick=${key++}>Key: $key</div>
     <else>
       <Wrapper depth={depth - 1} />
-    </if>  
+    </if>
   ';
 }
 
@@ -479,7 +520,7 @@ class Inst extends View {
 
   @:state public var count:Int = 0;
 
-  var elt = 
+  var elt =
     #if react
       null;
     #else {
@@ -525,6 +566,18 @@ class Inner extends View {
 
   override function viewDidUpdate()
     Tests.log('updated');
+}
+
+class DidRender extends View {
+  @:attribute var counter:Int;
+  function render() '
+    <div>${counter}</div>
+  ';
+
+  override function viewDidRender(firstTime:Bool) {
+    Tests.log('$firstTime');
+  }
+
 }
 
 class Blargh extends View {

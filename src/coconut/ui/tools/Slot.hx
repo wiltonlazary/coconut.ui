@@ -5,9 +5,10 @@ import tink.state.Observable;
 
 using tink.CoreApi;
 
-class Slot<T> implements ObservableObject<T> {
-  
-  var data:Observable<T>;
+class Slot<T, Container:Observable<T>> implements ObservableObject<T> {
+
+  var defaultData:Container;
+  var data:Container;
   var last:Pair<T, FutureTrigger<Noise>>;
   var link:CallbackLink;
   var owner:{};
@@ -17,23 +18,39 @@ class Slot<T> implements ObservableObject<T> {
     inline function get_value()
       return observe().value;
 
-  public function new(owner, ?compare) {
+  public function new(owner, ?compare, ?defaultData) {
     this.owner = owner;
     this.compare = switch compare {
       case null: function (a, b) return a == b;
       case v: v;
     }
+    this.data = this.defaultData = defaultData;
   }
-  
+
+  public function getComparator():Null<T->T->Bool>
+    return compare;
+
   public function poll() {
     if (last == null) {
       if (data == null) {
         last = new Pair(null, Future.trigger());
       }
       else {
-        var m = data.measure();
-        last = new Pair(m.value, Future.trigger());
-        link = m.becameInvalid.handle(last.b.trigger);
+        link = null;
+        var m = data.measure(),
+            changed = Future.trigger();
+
+        var dFault = null;
+        last = new Pair(switch m.value {
+          case null if (defaultData != null):
+            dFault = defaultData.measure();
+            dFault.value;
+          case v: v;
+        }, changed);
+
+        link = m.becameInvalid.handle(changed.trigger);
+        if (dFault != null)
+          link &= dFault.becameInvalid.handle(changed.trigger);
       }
       last.b.handle(function () last = null);
     }
@@ -46,21 +63,24 @@ class Slot<T> implements ObservableObject<T> {
   public inline function observe():Observable<T>
     return this;
 
-  public function setData(data:Observable<T>) {
+  public function setData(data:Container) {
+    if (data == null)
+      data = defaultData;
+    if (data == this.data) return;
     this.data = data;
     if (last != null) {
       link.dissolve();
       if (data != null) {
         var m = Observable.untracked(data.measure);
-        
+
         if (compare(m.value, last.a))
           link = m.becameInvalid.handle(last.b.trigger);
         else
           last.b.trigger(Noise);
-      }      
+      }
     }
   }
   #if debug @:keep #end
-  function toString() 
+  function toString()
     return 'Slot($owner)';
 }

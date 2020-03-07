@@ -1,8 +1,8 @@
 package coconut.ui;
 
-@:fromHxx(
-  transform = coconut.ui.macros.Helper.parseChildren(_)
-)
+#if macro
+private typedef RenderResult = {}
+#end
 @:pure
 abstract Children(Array<RenderResult>) from Array<RenderResult> {
   public var length(get, never):Int;
@@ -16,7 +16,7 @@ abstract Children(Array<RenderResult>) from Array<RenderResult> {
     return [r];
 
   public function concat(that:Array<RenderResult>):Children
-    return if (this == null) that else this.concat(that);  
+    return if (this == null) that else this.concat(that);
 
   public function prepend(r:RenderResult):Children
     return switch [this, r] {
@@ -33,5 +33,8 @@ abstract Children(Array<RenderResult>) from Array<RenderResult> {
       case [null, v]: v;
       case [a, b]: a.concat([b]);
     }
+
+  @:from macro static function ofOther(e:haxe.macro.Expr)
+    return macro @:pos(e.pos) [($e : coconut.ui.RenderResult)];
 
 }
