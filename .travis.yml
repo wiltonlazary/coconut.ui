@@ -6,7 +6,7 @@ stages:
   - deploy
 
 language: node_js
-node_js: 8
+node_js: 12
 
 cache:
   directories:
@@ -17,9 +17,8 @@ os:
   # - osx
 
 env:
-  - HAXE_VERSION=3.4.7
   - HAXE_VERSION=latest
-  # - HAXE_VERSION=nightly
+  - HAXE_VERSION=nightly
 
 install:
   - npm i -g lix
@@ -29,10 +28,15 @@ install:
 script:
   - lix run travix js -lib coconut.vdom
   - lix run travix js with-react.hxml
+  - lix run travix js with-react.hxml -lib coconut.vdom
+  - lix run travix js -lib coconut.vdom with-react.hxml
   - lix run travix js -lib coconut.vdom -debug
   - lix run travix js with-react.hxml -debug
+  - lix run travix js with-react-dev.hxml
 
 jobs:
+  allow_failures:
+    - env: HAXE_VERSION=nightly
   include:
     # - stage: test # should uncomment this when there is no matrix above (e.g. only one os, one env, etc)
     - stage: deploy

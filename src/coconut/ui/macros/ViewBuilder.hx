@@ -5,14 +5,32 @@ import coconut.data.macros.*;
 import haxe.macro.Context;
 import haxe.macro.Type;
 import haxe.macro.Expr;
-import tink.priority.Queue;
 
 using haxe.macro.Tools;
 using tink.MacroApi;
 using tink.CoreApi;
 
+typedef ViewInfo = {
+  target: ClassBuilder,
+  attributes:Array<Member>,
+  states:Array<Member>,
+  refs:Array<{
+    field:Member,
+    setter:Member,
+  }>,
+  lifeCycle: Array<Member>,
+}
+
 class ViewBuilder {
-  static public var afterBuild(default, null):Queue<Callback<{ target: ClassBuilder, attributes:Array<Member>, states:Array<Member> }>> = new Queue();
+
+  final config:Config;
+  final c:ClassBuilder;
+  final fieldInits:Array<Named<Expr>> = [];
+  final beforeRender = [];
+  final display = Context.defined('display');
+
+  function initField(name, expr)
+    this.fieldInits.push(new Named(name, expr));
 
   static function getComparator(t:MetadataEntry) {
     var comparator = macro @:pos(t.pos) null;
@@ -27,14 +45,42 @@ class ViewBuilder {
     return { comparator: comparator };
   }
 
+  function new(c, config) {
+    this.c = c;
+    this.config = config;
+  }
+
   static function noArgs(t:MetadataEntry)
     switch t.params {
       case []:
       case v: v[0].reject('no arguments allowed here');
     }
 
-  static function doBuild(c:ClassBuilder) {
+  function guessType(e:Expr, p:Position) {
+    var ret =
+      switch e {
+        case null:
+          if (display) null;
+          else p.error('Type or initial value required');
+        case { expr: EConst(c) }:
+          switch c {
+            case CIdent('true' | 'false'): macro : Bool;
+            case CInt(_): macro : Int;
+            case CFloat(_): macro : Float;
+            case CRegexp(_): macro : EReg;
+            case CString(_): macro : String;
+            default: null;
+          }
+        default:
+          null;
+      }
 
+    if (ret == null && !display)
+      e.reject('Cannot infer type, please annotate it explicitly.');
+    return ret;
+  }
+
+  function doBuild() {
     var defaultPos = (macro null).pos,//perhaps just use currentPos()
         classId = Models.classId(c.target);
 
@@ -44,18 +90,13 @@ class ViewBuilder {
       return t.fields;
     }
 
-    if (!c.target.meta.has(':tink'))
-      c.target.meta.add(':tink', [], defaultPos);
-
     c.target.meta.add(':observable', [], defaultPos);
 
-    switch c.target.superClass.t.get() {
-      case { pack: ['coconut', 'ui'], name: 'View' }:
-      default: c.target.pos.error('Subclassing views is currently not supported');
+    if (!c.target.superClass.t.get().meta.has(':coconut.viewbase')) {
+      c.target.pos.error('Subclassing views is currently not supported');
     }
 
-    var beforeRender = [],
-        tracked = [];
+    var tracked = [];
 
     function scrape<Meta>(name:String, process:MetadataEntry->Meta, ?aliases:Array<String>, ?skipCheck:Bool) {
       switch c.memberByName('${name}s') {
@@ -139,19 +180,22 @@ class ViewBuilder {
     function slotName(name)
       return '__coco_$name';
 
-    function addAttribute(a, expr:Expr, type:ComplexType, publicType:ComplexType, optional:Bool, comparator, ?meta) {
+    function addAttribute(pos, a, expr:Expr, type:ComplexType, publicType:ComplexType, optional:Bool, comparator, ?meta) {
       var name = a.name;
       var data = macro @:pos(a.pos) attributes.$name,
           slotName = slotName(a.name);
 
-      initSlots.push(macro @:pos(a.pos) this.$slotName.setData($data));
+      if (!display) {
+        initSlots.push(macro @:pos(a.pos) this.$slotName.setData($data));
 
-      if (expr == null)
-        expr = macro @:pos(a.pos) null;
-      add(macro class {
-        private var $slotName(default, never):coconut.ui.tools.Slot<$type, $publicType> =
-          new coconut.ui.tools.Slot<$type, $publicType>(this, ${comparator}, $expr);
-      });
+        if (expr == null)
+          expr = macro @:pos(a.pos) null;
+
+        add(macro class {
+          @:noCompletion private final $slotName:coconut.ui.internal.Slot<$type, $publicType>;
+        });
+        initField(slotName, macro new coconut.ui.internal.Slot<$type, $publicType>(this, ${comparator}, $expr));
+      }
 
       switch a.pos.getOutcome(type.toType()).reduce() {
         case TDynamic(null):
@@ -163,10 +207,10 @@ class ViewBuilder {
 
       attributes.push({
         name: a.name,
-        pos: a.pos,
+        pos: pos,
         kind: FVar(publicType),
         meta:
-          (if (optional) [{ name: ':optional', params: [], pos: expr.pos }] else [])
+          (if (optional) [{ name: ':optional', params: [], pos: (macro null).pos }] else [])
             .concat(switch meta {
               case null: [];
               case v: v;
@@ -189,7 +233,7 @@ class ViewBuilder {
         if (optional && expr == null)
           expr = macro @:pos(a.pos) null;
 
-        addAttribute(a, expr, type, macro : coconut.data.Value<$type>, optional,
+        addAttribute(attr.pos, a, expr, type, macro : coconut.data.Value<$type>, optional,
           attr.meta.comparator,
           a.metaNamed(':children')
             .concat(a.metaNamed(':child'))
@@ -204,7 +248,10 @@ class ViewBuilder {
             case macro : Null<$_>: true;
             default: false;
           }
-        a.isPublic = true;
+
+        a.publish();
+
+        if (display) return;
         a.kind =
           switch a.pos.getOutcome(type.toType()).reduce() {
             case TFun(args, ret) if (!isNullable):
@@ -215,7 +262,7 @@ class ViewBuilder {
                   default:
                     [for (i in 0...args.length) {
                       name: 'a$i',
-                      type: null,
+                      type: args[i].t.toComplex(),
                       opt: args[i].opt
                     }];
                 }
@@ -250,10 +297,13 @@ class ViewBuilder {
       }
 
       switch a.kind {
-        case FVar(null, _):
-          a.pos.error('type required');//TODO: infer if possible
         case FVar(t, e):
-          add(t, e);
+          if (t == null)
+            t = guessType(e, a.pos);
+          add(t, switch [e, t] {
+            case [null, macro : Bool]: macro false;
+            default: e;
+          });
         case FFun(f):
           add(
             TFunction(
@@ -272,9 +322,9 @@ class ViewBuilder {
 
     for (c in scrape('controlled', noArgs))
       switch c.member.kind {
-        case FVar(null, _):
-          c.pos.error('type required');//TODO: infer if possible
         case FVar(t, e):
+          if (t == null)
+            t = guessType(e, c.pos);
           var optional = switch e {
             case null:
               if (c.member.metaNamed(':optional').length > 0) {
@@ -287,7 +337,7 @@ class ViewBuilder {
               true;
           }
 
-          addAttribute(c.member, e, t, macro : coconut.data.Variable<$t>, optional, macro @:pos(c.pos) null);
+          addAttribute(c.pos, c.member, e, t, macro : coconut.data.Variable<$t>, optional, macro @:pos(c.pos) null);
 
           c.member.kind = FProp('get', 'set', t);
 
@@ -312,6 +362,66 @@ class ViewBuilder {
           c.pos.error('controlled attributes cannot be ${if (isFunc) 'functions' else 'properties'}');
       }
 
+    switch scrape('implicit', noArgs) {
+      case []:
+      case found:
+
+        var implicits =
+          switch config.implicits {
+            case null: found[0].pos.error('The current backend does not support implicit attributes');
+            case v:
+              for (f in v.fields)
+                c.addMember(f);
+              v.name;
+          }
+
+        for (i in found)
+          switch i.member {
+            case m = { kind: FVar(t, e), name: name }:
+              if (t == null)
+                e.pos.error('type required');
+
+              addAttribute(i.pos, m, {
+                var fallback = switch e {
+                  case null:
+                    switch m.pos.getOutcome(t.toType()).reduce() {
+                      case TEnum(_.get().meta => m, _)
+                        | TInst(_.get().meta => m, _):
+                        switch m.extract(':default') {
+                          case []: i.pos.error(t.toString() + ' has no @:default and $name has no default value');
+                          case [{ params: [e] }]: e;
+                          default: i.pos.error(t.toString() + ' must have exactly one @:default with exactly one argument');
+                        }
+                      default:
+                        i.pos.error('Only enum values and instances can be implicit');
+                    }
+                  default: e;
+                }
+
+                macro {
+                  var fallback = tink.core.Lazy.ofFunc(() -> $fallback);
+                  tink.state.Observable.auto(() -> switch $i{implicits}.get($p{t.toString().split('.')}) {
+                    case null: fallback.get();
+                    case v: v;
+                  });
+                }
+              }, t, macro : coconut.data.Value<$t>, true, macro null);
+              m.publish();
+              m.kind = FProp('get', 'never', t);
+
+              var getter = 'get_$name',
+                  slotName = slotName(name);
+
+              c.addMembers(macro class {
+                @:noCompletion inline function $getter():$t
+                  return this.$slotName.value;
+              });
+            default:
+              i.pos.error('@:implicit only allowed on plain fields');
+          }
+
+    }
+
     var rendererPos = null;
     var renderer = switch c.memberByName('render') {
       case Success(m):
@@ -319,16 +429,30 @@ class ViewBuilder {
         m.addMeta(':noCompletion', (macro null).pos);
         m.getFunction().sure();
       default:
-        c.target.pos.error('missing field render');
+        if (display) {
+          rendererPos = (macro null).pos;
+          {
+            args: [],
+            ret: config.renders,
+            expr: macro return null,
+          }
+        }
+        else
+          c.target.pos.error('missing field render');
     }
 
     if (renderer.args.length > 0)
       rendererPos.error('argument should not be specified');
 
-    switch renderer.ret {
-      case null: renderer.ret = macro : coconut.ui.RenderResult;
-      case ct: (macro @:pos(rendererPos) ((null:$ct):coconut.ui.RenderResult)).typeof().sure();
+    {
+      var renders = config.renders;
+      switch renderer.ret {
+        case null: renderer.ret = macro : $renders;
+        case ct: (macro @:pos(rendererPos) ((null:$ct):$renders)).typeof().sure();
+      }
     }
+
+    var refs = [];
 
     for (ref in scrape('ref', noArgs, true)) {
       var f = ref.member;
@@ -345,33 +469,40 @@ class ViewBuilder {
       }).bounce(f.pos);
 
       f.addMeta(':refSetter', [macro $i{setter}]);
-      c.addMembers(macro class {
-        @:noCompletion function $setter(param:$type) $set;
-      });
-    }
 
-    renderer.expr = beforeRender.concat([switch renderer.expr {
-      case e = { expr: EConst(CString(s)), pos: p }: macro @:pos(p) return hxx($e);
-      case e: e;
-    }]).toBlock(renderer.expr.pos);
+      refs.push({
+        field: f,
+        setter: c.addMembers(macro class {
+          @:noCompletion function $setter(param:$type) $set;
+        })[0],
+      });
+
+
+    }
 
     var states = [];
 
     for (state in scrape('state', getComparator)) {
+      if (display) continue;// this is a bit extreme, but should work
       var s = state.member;
       states.push(s);
       var v = s.getVar(true).sure();
 
       if (v.expr == null)
-        s.pos.error('@:state requires initial value');
+        if (display) v.expr = macro null;
+        else s.pos.error('@:state requires initial value');
 
-      var t = v.type;
+      var t = switch v.type {
+        case null: guessType(v.expr, s.pos);
+        case v: v;
+      }
+
       var internal = '__coco_${s.name}',
           get = 'get_${s.name}',
           set = 'set_${s.name}';
 
       c.addMembers(macro class {
-        @:noCompletion private var $internal:tink.state.State<$t> = @:pos(v.expr.pos) new tink.state.State<$t>(${v.expr}, ${state.meta.comparator});
+        @:noCompletion private final $internal:tink.state.State<$t>;
         inline function $get():$t return $i{internal}.value;
         inline function $set(param:$t) {
           $i{internal}.set(param);
@@ -379,8 +510,12 @@ class ViewBuilder {
         }
       });
 
+      initField(internal, macro new tink.state.State<$t>(${v.expr}, ${state.meta.comparator}));
+
       s.kind = FProp('get', 'set', t, null);
     }
+
+    var lifeCycle = [];
 
     {
       if (c.hasConstructor())
@@ -393,7 +528,7 @@ class ViewBuilder {
           switch c.memberByName(name) {
             case Success(m):
               var f = m.getFunction().sure();
-
+              lifeCycle.push(m);
               m.overrides = false;
               if (m.metaNamed(':noCompletion').length == 0)
                 m.addMeta(':noCompletion');
@@ -424,8 +559,7 @@ class ViewBuilder {
           m.pos.error('${m.name} cannot take arguments');
       });
 
-      var beforeRender = [],
-          afterRender = [];
+      var afterRender = [];
 
       var snapshot = null;
 
@@ -543,6 +677,7 @@ class ViewBuilder {
                     changed = tink.Anon.existentFields(nu);
 
                 $b{applyChanges}
+                return null;
               })
             );
 
@@ -625,10 +760,11 @@ class ViewBuilder {
               get = 'get_${f.name}';
 
           c.addMembers(macro class {
-            @:noCompletion private var $internal:tink.state.Observable<$t> =
-              @:pos(e.pos) tink.state.Observable.auto(function ():$t return $e);
+            @:noCompletion private final $internal:tink.state.Observable<$t>;
             inline function $get() return $i{internal}.value;
           });
+
+          initField(internal, macro @:pos(e.pos) tink.state.Observable.auto(function ():$t return $e));
 
           if (f.metaNamed(':skipCheck').length == 0)
             Models.checkLater(f.name, classId);
@@ -637,16 +773,194 @@ class ViewBuilder {
         default:
       }
 
-    for (cb in afterBuild)
-      cb.invoke({
-        target: c,
-        attributes: attributes,
-        states: states,
-      });
+    var ctor = c.getConstructor();
+    for (f in fieldInits)
+      ctor.init(f.name, f.value.pos, Value(hxxExprSugar(f.value)));
+
+    for (f in c)
+      f.kind = switch f.kind {
+        case FFun(f):
+          FFun(
+            switch tink.hxx.Sugar.markupOnlyFunctions(f) {
+              case _ == f => true:
+                {
+                  args: f.args,
+                  ret: f.ret,
+                  params: f.params,
+                  expr: hxxExprSugar(f.expr),
+                }
+              case v: v;
+            }
+          );
+        case FVar(t, e):
+          FVar(t, hxxExprSugar(e));
+        case FProp(get, set, t, e):
+          FProp(get, set, t, hxxExprSugar(e));
+      }
+
+    renderer.expr = macro {
+      $b{beforeRender};
+      ${renderer.expr};
+    }
+
+    config.afterBuild.invoke({
+      target: c,
+      attributes: attributes,
+      states: states,
+      refs: refs,
+      lifeCycle: lifeCycle,
+    });
   }
 
-  static function build() {
-    return ClassBuilder.run([doBuild]);
+  function hxxExprSugar(e:Expr)
+    return e.transform(tink.hxx.Sugar.transformExpr);
+
+  @:persistent static final configs:Map<String, Config> = new Map();
+
+  static public function autoBuild(config:Config)
+    return ClassBuilder.run([
+      c -> new ViewBuilder(c, config).doBuild(),
+      #if hotswap
+        hotswap.Macro.lazify
+      #end
+    ]);
+
+  static function autoBuildWith(configId:String)
+    return autoBuild(switch configs[configId] {
+      case null: Context.fatalError('please restart the compiler server', Context.currentPos());
+      case v: v;
+    });
+
+  static function build(e:Expr)
+    return
+      switch e {
+        case macro ($_:$ct):
+          buildBase(ct);
+        default:
+          e.reject();
+      }
+
+  static function buildBase(renders:ComplexType, ?fn) {
+    var cls = Context.getLocalClass().get();
+
+    cls.meta.add(':observable', [], (macro null).pos);
+    cls.meta.add(':coconut.viewbase', [], (macro null).pos);
+
+    if (fn != null)
+      fn(cls);
+
+    return Context.getBuildFields().concat(base(renders).fields);
   }
+
+  static public function init(renders:ComplexType, afterBuild:Callback<ViewInfo>)
+    return buildBase(renders, function (cls) {
+      Context.currentPos().warning('Your coconut backend seems to be out of date');
+
+      var id = '${cls.module}.${cls.name}';
+
+      configs.set(id, { renders: renders, afterBuild: afterBuild });
+
+      cls.meta.add(':autoBuild', [macro coconut.ui.macros.ViewBuilder.autoBuildWith($v{id})], (macro null).pos);
+    });
+
+
+  static function base(renders) return macro class {
+    public var viewId(default, null):Int = idCounter++; static var idCounter = 0;
+
+    @:noCompletion final _coco_revision:tink.state.State<Int>;
+
+    public function new(
+        render:Void->$renders,
+        shouldUpdate:Void->Bool,
+        track:Void->Void,
+        beforeRerender:Void->Void,
+        rendered:Bool->Void
+      ) {
+
+      var mounted = if (rendered != null) rendered.bind(true) else null,
+          updated = if (rendered != null) rendered.bind(false) else null;
+
+      var firstTime = true,
+          last = null,
+          hasBeforeRerender = beforeRerender != null,
+          hasUpdated = updated != null,
+          _coco_revision = new tink.state.State(0);
+
+      var lastRev = _coco_revision.value;
+
+      super(
+        tink.state.Observable.auto(
+          function renderView() {
+            var curRev = _coco_revision.value;
+            if (track != null) track();
+
+            if (firstTime) firstTime = false;
+            else {
+              if (curRev == lastRev && shouldUpdate != null && !shouldUpdate())
+                return last;
+              var hasCallbacks = __bc.length > 0;
+              if (hasBeforeRerender || hasCallbacks)
+                tink.state.Observable.untracked(function () {
+                  if (hasBeforeRerender) beforeRerender();
+                  if (hasCallbacks) for (c in __bc.splice(0, __bc.length)) c.invoke(false);
+                  return null;
+                });
+            }
+            lastRev = curRev;
+            return last = render();
+          }
+        ),
+        mounted,
+        function () {
+          var hasCallbacks = __au.length > 0;
+          if (hasUpdated || hasCallbacks)
+            tink.state.Observable.untracked(function () {
+              if (hasUpdated) updated();
+              if (hasCallbacks) for (c in __au.splice(0, __au.length)) c.invoke(Noise);
+              return null;
+            });
+        },
+        function () {
+          last = null;
+          firstTime = true;
+          __beforeUnmount();
+        }
+      );
+
+      this._coco_revision = _coco_revision;
+    }
+
+    @:noCompletion var __bu:Array<tink.core.Callback.CallbackLink> = [];
+    @:noCompletion function __beforeUnmount() {
+      for (c in __bu.splice(0, __bu.length)) c.cancel();
+      for (c in __bc.splice(0, __bu.length)) c.invoke(true);
+    }
+
+    @:extern inline function untilUnmounted(c:tink.core.Callback.CallbackLink):Void __bu.push(c);
+    @:extern inline function beforeUnmounting(c:tink.core.Callback.CallbackLink):Void __bu.push(c);
+
+    @:noCompletion var __bc:Array<tink.core.Callback<Bool>> = [];
+
+    @:extern inline function untilNextChange(c:tink.core.Callback<Bool>):Void __bc.push(c);
+    @:extern inline function beforeNextChange(c:tink.core.Callback<Bool>):Void __bc.push(c);
+
+    @:noCompletion var __au:Array<tink.core.Callback<tink.core.Noise>> = [];
+
+    @:extern inline function afterUpdating(callback:Void->Void) __au.push(callback);
+
+    function forceUpdate(?callback) {
+      _coco_revision.set(_coco_revision.value + 1);
+      if (callback != null) afterUpdating(callback);
+    }
+  }
+}
+
+private typedef Config = {
+  final renders:ComplexType;
+  final ?implicits:{
+    final name:String;
+    final fields:Array<Field>;
+  }
+  final afterBuild:Callback<ViewInfo>;
 }
 #end
